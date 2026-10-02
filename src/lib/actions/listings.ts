@@ -1,0 +1,146 @@
+"use server";
+
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import { redirect } from "next/navigation";
+import { revalidatePath } from "next/cache";
+import { getDb, UPLOAD_DIR } from "@/lib/db";
+import { requireUser } from "@/lib/auth";
+import { AMENITIES } from "@/lib/constants";
+import { flattenErrors, listingSchema, type FormState } from "@/lib/validation";
+
+const MAX_PHOTOS = 8;
+const MAX_BYTES = 10 * 1024 * 1024;
+const EXT: Record<string, string> = { "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp" };
+
+async function savePhotos(files: File[]): Promise<{ urls: string[]; error?: string }> {
+  const urls: string[] = [];
+  for (const f of files) {
+    const ext = EXT[f.type];
+    if (!ext) return { urls, error: "Photos must be JPG, PNG or WebP files." };
+    if (f.size > MAX_BYTES) return { urls, error: `${f.name} is larger than 10MB.` };
+    const name = crypto.randomUUID() + ext;
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+    fs.writeFileSync(path.join(UPLOAD_DIR, name), Buffer.from(await f.arrayBuffer()));
+    urls.push(`/media/${name}`);
+  }
+  return { urls };
+}
+
+function removeUploadFile(url: string) {
+  if (!url.startsWith("/media/")) return; // bundled demo photos stay
+  const file = path.join(UPLOAD_DIR, path.basename(url));
+  fs.rm(file, { force: true }, () => {});
+}
+
+function readForm(fd: FormData) {
+  const raw = Object.fromEntries(
+    ["title", "type", "state", "area", "price", "bedrooms", "bathrooms", "area_sqm", "tag", "description"].map(
+      (k) => [k, String(fd.get(k) ?? "")]
+    )
+  );
+  const amenities = fd
+    .getAll("amenities")
+    .map(String)
+    .filter((a) => (AMENITIES as readonly string[]).includes(a));
+  const photos = fd.getAll("photos").filter((f): f is File => f instanceof File && f.size > 0);
+  return { raw, amenities, photos };
+}
+
+const autoApprove = () => process.env.AUTO_APPROVE_LISTINGS === "true";
+
+export async function createListing(_: FormState, fd: FormData): Promise<FormState> {
+  const user = await requireUser(["landlord", "admin"]);
+  const { raw, amenities, photos } = readForm(fd);
+
+  const parsed = listingSchema.safeParse(raw);
+  const fieldErrors = parsed.success ? {} : flattenErrors(parsed.error);
+  if (photos.length === 0) fieldErrors.photos = "Add at least one photo of the property.";
+  if (photos.length > MAX_PHOTOS) fieldErrors.photos = `You can add up to ${MAX_PHOTOS} photos.`;
+  if (!parsed.success || Object.keys(fieldErrors).length) return { fieldErrors };
+
+  const saved = await savePhotos(photos);
+  if (saved.error) return { fieldErrors: { photos: saved.error } };
+
+  const d = parsed.data;
+  const db = getDb();
+  const status = user.role === "admin" || autoApprove() ? "approved" : "pending";
+  const id = db.transaction(() => {
+    const info = db
+      .prepare(
+        `INSERT INTO properties (owner_id, title, description, type, state, area, price_yearly, bedrooms, bathrooms,
+           area_sqm, tag, amenities, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(user.id, d.title, d.description, d.type, d.state, d.area, d.price, d.bedrooms, d.bathrooms, d.area_sqm, d.tag, JSON.stringify(amenities), status);
+    const pid = Number(info.lastInsertRowid);
+    const ins = db.prepare("INSERT INTO property_images (property_id, url, position) VALUES (?,?,?)");
+    saved.urls.forEach((u, i) => ins.run(pid, u, i));
+    return pid;
+  })();
+
+  revalidatePath("/", "layout");
+  redirect(`/dashboard?tab=listings&posted=${status}&id=${id}`);
+}
+
+export async function updateListing(id: number, _: FormState, fd: FormData): Promise<FormState> {
+  const user = await requireUser(["landlord", "admin"]);
+  const db = getDb();
+  const existing = db.prepare("SELECT owner_id, status FROM properties WHERE id = ?").get(id) as
+    | { owner_id: number; status: string }
+    | undefined;
+  if (!existing || (existing.owner_id !== user.id && user.role !== "admin")) redirect("/dashboard");
+
+  const { raw, amenities, photos } = readForm(fd);
+  const removeIds = fd.getAll("remove_images").map(Number).filter(Number.isInteger);
+  const current = db.prepare("SELECT id, url FROM property_images WHERE property_id = ?").all(id) as { id: number; url: string }[];
+  const remaining = current.filter((i) => !removeIds.includes(i.id));
+
+  const parsed = listingSchema.safeParse(raw);
+  const fieldErrors = parsed.success ? {} : flattenErrors(parsed.error);
+  if (remaining.length + photos.length === 0) fieldErrors.photos = "A listing needs at least one photo.";
+  if (remaining.length + photos.length > MAX_PHOTOS) fieldErrors.photos = `A listing can have up to ${MAX_PHOTOS} photos.`;
+  if (!parsed.success || Object.keys(fieldErrors).length) return { fieldErrors };
+
+  const saved = await savePhotos(photos);
+  if (saved.error) return { fieldErrors: { photos: saved.error } };
+
+  const d = parsed.data;
+  // Editing a live listing sends it back through review (unless an admin edits or auto-approve is on).
+  const status = user.role === "admin" || autoApprove() ? existing.status === "rejected" ? "pending" : existing.status : "pending";
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE properties SET title=?, description=?, type=?, state=?, area=?, price_yearly=?, bedrooms=?, bathrooms=?,
+         area_sqm=?, tag=?, amenities=?, status=? WHERE id=?`
+    ).run(d.title, d.description, d.type, d.state, d.area, d.price, d.bedrooms, d.bathrooms, d.area_sqm, d.tag, JSON.stringify(amenities), status, id);
+    for (const img of current.filter((i) => removeIds.includes(i.id))) {
+      db.prepare("DELETE FROM property_images WHERE id = ?").run(img.id);
+      removeUploadFile(img.url);
+    }
+    const maxPos = (db.prepare("SELECT COALESCE(MAX(position), -1) AS m FROM property_images WHERE property_id = ?").get(id) as { m: number }).m;
+    const ins = db.prepare("INSERT INTO property_images (property_id, url, position) VALUES (?,?,?)");
+    saved.urls.forEach((u, i) => ins.run(id, u, maxPos + 1 + i));
+  })();
+
+  revalidatePath("/", "layout");
+  redirect(`/dashboard?tab=listings&updated=${status}`);
+}
+
+export async function toggleRented(id: number) {
+  const user = await requireUser(["landlord", "admin"]);
+  getDb()
+    .prepare("UPDATE properties SET rented = 1 - rented WHERE id = ? AND (owner_id = ? OR ? = 'admin')")
+    .run(id, user.id, user.role);
+  revalidatePath("/", "layout");
+}
+
+export async function deleteListing(id: number) {
+  const user = await requireUser(["landlord", "admin"]);
+  const db = getDb();
+  const owns = db.prepare("SELECT 1 FROM properties WHERE id = ? AND (owner_id = ? OR ? = 'admin')").get(id, user.id, user.role);
+  if (!owns) return;
+  const imgs = db.prepare("SELECT url FROM property_images WHERE property_id = ?").all(id) as { url: string }[];
+  db.prepare("DELETE FROM properties WHERE id = ?").run(id);
+  imgs.forEach((i) => removeUploadFile(i.url));
+  revalidatePath("/", "layout");
+}
