@@ -8,10 +8,11 @@ import { FeaturedCard } from "@/components/PropertyCard";
 
 export default async function HomePage() {
   const user = await getUser();
-  const featured = featuredProperties(user?.id ?? null);
-  const total = countApproved();
+  const featured = await featuredProperties(user?.id ?? null);
+  const total = await countApproved();
   const tilePhotos = ["exterior", "living", "exterior", "bedroom", "living", "exterior"];
   const positions = ["object-[50%_30%]", "object-center", "object-[85%_50%]", "object-center", "object-[30%_60%]", "object-[15%_40%]"];
+  const popularCounts = await Promise.all(POPULAR_LOCATIONS.map((l) => countByArea(l.q)));
 
   return (
     <div className="mx-auto max-w-page space-y-10 px-4 pb-4 pt-6 md:space-y-14 md:px-6 md:pt-10">
@@ -104,7 +105,7 @@ export default async function HomePage() {
         <h2 id="pop-h" className="mb-4 text-xl font-bold md:text-2xl">Popular locations</h2>
         <ul className="grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4">
           {POPULAR_LOCATIONS.map((l, i) => {
-            const n = countByArea(l.q);
+            const n = popularCounts[i];
             return (
               <li key={l.area}>
                 <Link href={`/listings?q=${encodeURIComponent(l.q)}`} className="relative block overflow-hidden rounded-xl border border-stone">

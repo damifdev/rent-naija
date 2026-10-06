@@ -50,11 +50,12 @@ export const getUser = cache(async (): Promise<User | null> => {
   if (!token) return null;
   try {
     const { payload } = await jwtVerify(token, secret());
-    const row = getDb()
+    const db = await getDb();
+    const row = (await db
       .prepare(
         "SELECT id, name, email, phone, role, agency, avatar_url, verified FROM users WHERE id = ?"
       )
-      .get(payload.uid as number) as User | undefined;
+      .get(payload.uid as number)) as User | undefined;
     return row ?? null;
   } catch {
     return null;

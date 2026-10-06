@@ -8,9 +8,9 @@ import { locationLabel } from "@/lib/constants";
 import { FavoriteButton } from "../FavoriteButton";
 import { Tabs } from "./Tabs";
 
-export function TenantDashboard({ user, tab }: { user: User; tab: string }) {
-  const saved = savedProperties(user.id);
-  const inquiries = inquiriesBySender(user.id);
+export async function TenantDashboard({ user, tab }: { user: User; tab: string }) {
+  const saved = await savedProperties(user.id);
+  const inquiries = await inquiriesBySender(user.id);
   const active = tab === "inquiries" ? "inquiries" : "saved";
 
   return (

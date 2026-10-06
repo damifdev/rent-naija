@@ -28,7 +28,7 @@ export default async function ListingsPage({ searchParams }: { searchParams: SP 
   const sp = await searchParams;
   const f = parseFilters(sp);
   const user = await getUser();
-  const { items, total, page, pages } = searchProperties(f, user?.id ?? null);
+  const { items, total, page, pages } = await searchProperties(f, user?.id ?? null);
   const active = activeFilterCount(f);
   const initial = { state: f.state, area: f.area, type: f.type, min: f.min, max: f.max, beds: f.beds, baths: f.baths };
   const formKey = toQuery(f, { page: 1, sort: "newest" });

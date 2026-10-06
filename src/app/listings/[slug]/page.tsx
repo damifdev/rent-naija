@@ -17,7 +17,7 @@ type Params = Promise<{ slug: string }>;
 const idFrom = (slug: string) => parseInt(slug, 10);
 
 export async function generateMetadata({ params }: { params: Params }): Promise<Metadata> {
-  const p = getProperty(idFrom((await params).slug), null);
+  const p = await getProperty(idFrom((await params).slug), null);
   if (!p || p.status !== "approved") return { title: "Home not found" };
   const loc = locationLabel(p.area, p.state);
   return {
@@ -33,12 +33,12 @@ export default async function PropertyPage({ params }: { params: Params }) {
   const id = idFrom(slug);
   if (!Number.isInteger(id)) notFound();
   const user = await getUser();
-  const p = getProperty(id, user?.id ?? null);
+  const p = await getProperty(id, user?.id ?? null);
   if (!p) notFound();
   const isOwner = !!user && (user.id === p.owner_id || user.role === "admin");
   if (p.status !== "approved" && !isOwner) notFound();
 
-  const similar = similarProperties(p, user?.id ?? null);
+  const similar = await similarProperties(p, user?.id ?? null);
   const loc = locationLabel(p.area, p.state);
   const mapUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${p.area}, ${p.state}, Nigeria`)}`;
   const wa = `https://wa.me/${toWhatsApp(p.owner_phone)}?text=${encodeURIComponent(`Hello ${p.owner_name}, I saw "${p.title}" on RentNaija and I'm interested.`)}`;

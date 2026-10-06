@@ -21,13 +21,13 @@ export async function sendInquiry(propertyId: number, _: FormState, fd: FormData
     return { error: "You have sent several inquiries already. Please wait a while before sending more." };
   }
 
-  const db = getDb();
-  const prop = db.prepare("SELECT id FROM properties WHERE id = ? AND status = 'approved'").get(propertyId);
+  const db = await getDb();
+  const prop = await db.prepare("SELECT id FROM properties WHERE id = ? AND status = 'approved'").get(propertyId);
   if (!prop) return { error: "This listing is no longer available." };
 
   const user = await getUser();
   const d = parsed.data;
-  db.prepare("INSERT INTO inquiries (property_id, sender_id, name, phone, message) VALUES (?,?,?,?,?)").run(
+  await db.prepare("INSERT INTO inquiries (property_id, sender_id, name, phone, message) VALUES (?,?,?,?,?)").run(
     propertyId, user?.id ?? null, d.name, d.phone, d.message
   );
   revalidatePath("/dashboard");
@@ -36,7 +36,8 @@ export async function sendInquiry(propertyId: number, _: FormState, fd: FormData
 
 export async function markInquiryRead(id: number) {
   const user = await requireUser(["landlord", "admin"]);
-  getDb()
+  const db = await getDb();
+  await db
     .prepare(
       `UPDATE inquiries SET read_at = CASE WHEN read_at IS NULL THEN datetime('now') ELSE NULL END
        WHERE id = ? AND property_id IN (SELECT id FROM properties WHERE owner_id = ? OR ? = 'admin')`
@@ -48,10 +49,10 @@ export async function markInquiryRead(id: number) {
 export async function toggleFavorite(propertyId: number, returnTo: string) {
   const user = await getUser();
   if (!user) redirect(`/login?next=${encodeURIComponent(returnTo)}`);
-  const db = getDb();
-  const del = db.prepare("DELETE FROM favorites WHERE user_id = ? AND property_id = ?").run(user.id, propertyId);
+  const db = await getDb();
+  const del = await db.prepare("DELETE FROM favorites WHERE user_id = ? AND property_id = ?").run(user.id, propertyId);
   if (del.changes === 0) {
-    db.prepare("INSERT OR IGNORE INTO favorites (user_id, property_id) VALUES (?, ?)").run(user.id, propertyId);
+    await db.prepare("INSERT OR IGNORE INTO favorites (user_id, property_id) VALUES (?, ?)").run(user.id, propertyId);
   }
   revalidatePath("/", "layout");
 }

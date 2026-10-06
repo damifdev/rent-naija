@@ -57,7 +57,7 @@ function Row({ p, pending }: { p: Card; pending?: boolean }) {
 
 export default async function AdminPage() {
   await requireUser(["admin"]);
-  const { pending, all, users } = adminOverview();
+  const { pending, all, users } = await adminOverview();
 
   return (
     <div className="mx-auto max-w-4xl space-y-10 px-4 py-6 md:py-10">

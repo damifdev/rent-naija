@@ -11,11 +11,11 @@ import { ConfirmButton } from "../ConfirmButton";
 import { StatusPill } from "../StatusPill";
 import { Tabs } from "./Tabs";
 
-export function LandlordDashboard({
+export async function LandlordDashboard({
   user, tab, notice,
 }: { user: User; tab: string; notice?: string }) {
-  const listings = ownerProperties(user.id);
-  const inquiries = inquiriesForOwner(user.id);
+  const listings = await ownerProperties(user.id);
+  const inquiries = await inquiriesForOwner(user.id);
   const unread = inquiries.filter((i) => !i.read_at).length;
   const active = tab === "inquiries" ? "inquiries" : "listings";
 

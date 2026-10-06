@@ -57,7 +57,7 @@ const CARD_SELECT = `
 
 const esc = (s: string) => s.replace(/[\\%_]/g, (m) => "\\" + m);
 
-export function searchProperties(f: Filters, userId: number | null) {
+export async function searchProperties(f: Filters, userId: number | null) {
   const where: string[] = ["p.status = 'approved'", "p.rented = 0"];
   const params: Record<string, string | number | null> = { uid: userId ?? 0 };
 
@@ -86,75 +86,83 @@ export function searchProperties(f: Filters, userId: number | null) {
     : f.sort === "price_desc" ? "p.price_yearly DESC, p.id DESC"
     : "p.created_at DESC, p.id DESC";
 
-  const db = getDb();
+  const db = await getDb();
   const whereSql = where.join(" AND ");
-  const { n } = db
+  const { n } = (await db
     .prepare(`SELECT COUNT(*) AS n FROM properties p WHERE ${whereSql}`)
-    .get(params) as { n: number };
+    .get(params)) as { n: number };
   const page = Math.max(1, f.page ?? 1);
-  const items = db
+  const items = (await db
     .prepare(`${CARD_SELECT} WHERE ${whereSql} ORDER BY ${order} LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`)
-    .all(params) as Card[];
+    .all(params)) as Card[];
   return { items, total: n, page, pages: Math.max(1, Math.ceil(n / PAGE_SIZE)) };
 }
 
-export function featuredProperties(userId: number | null, limit = 8) {
-  return getDb()
+export async function featuredProperties(userId: number | null, limit = 8) {
+  const db = await getDb();
+  return db
     .prepare(
       `${CARD_SELECT} WHERE p.status='approved' AND p.rented=0 AND p.featured=1
        ORDER BY p.created_at DESC LIMIT ${limit}`
     )
-    .all({ uid: userId ?? 0 }) as Card[];
+    .all({ uid: userId ?? 0 }) as Promise<Card[]>;
 }
 
-export function countApproved() {
-  return (getDb()
+export async function countApproved() {
+  const db = await getDb();
+  const row = (await db
     .prepare("SELECT COUNT(*) AS n FROM properties WHERE status='approved' AND rented=0")
-    .get() as { n: number }).n;
+    .get()) as { n: number };
+  return row.n;
 }
 
-export function countByArea(q: string) {
-  return (getDb()
+export async function countByArea(q: string) {
+  const db = await getDb();
+  const row = (await db
     .prepare(
       "SELECT COUNT(*) AS n FROM properties WHERE status='approved' AND rented=0 AND (area LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\')"
     )
-    .get(`%${esc(q)}%`, `%${esc(q)}%`) as { n: number }).n;
+    .get(`%${esc(q)}%`, `%${esc(q)}%`)) as { n: number };
+  return row.n;
 }
 
-export function getProperty(id: number, userId: number | null): Detail | null {
-  const db = getDb();
-  const row = db
+export async function getProperty(id: number, userId: number | null): Promise<Detail | null> {
+  const db = await getDb();
+  const row = (await db
     .prepare(`SELECT c.*, p.description, p.area_sqm, p.amenities FROM (${CARD_SELECT} WHERE p.id = @id) c JOIN properties p ON p.id = c.id`)
-    .get({ id, uid: userId ?? 0 }) as (Card & { description: string; area_sqm: number | null; amenities: string }) | undefined;
+    .get({ id, uid: userId ?? 0 })) as (Card & { description: string; area_sqm: number | null; amenities: string }) | undefined;
   if (!row) return null;
-  const images = db
+  const images = (await db
     .prepare("SELECT id, url FROM property_images WHERE property_id = ? ORDER BY position, id")
-    .all(id) as { id: number; url: string }[];
+    .all(id)) as { id: number; url: string }[];
   return { ...row, amenities: JSON.parse(row.amenities || "[]"), images };
 }
 
-export function similarProperties(p: Card, userId: number | null, limit = 6) {
-  return getDb()
+export async function similarProperties(p: Card, userId: number | null, limit = 6) {
+  const db = await getDb();
+  return db
     .prepare(
       `${CARD_SELECT} WHERE p.status='approved' AND p.rented=0 AND p.id != @id AND p.state = @state
        ORDER BY (p.area = @area) DESC, (p.type = @type) DESC, ABS(p.price_yearly - @price) ASC LIMIT ${limit}`
     )
-    .all({ uid: userId ?? 0, id: p.id, state: p.state, area: p.area, type: p.type, price: p.price_yearly }) as Card[];
+    .all({ uid: userId ?? 0, id: p.id, state: p.state, area: p.area, type: p.type, price: p.price_yearly }) as Promise<Card[]>;
 }
 
-export function ownerProperties(ownerId: number) {
-  return getDb()
+export async function ownerProperties(ownerId: number) {
+  const db = await getDb();
+  return db
     .prepare(`${CARD_SELECT} WHERE p.owner_id = @owner ORDER BY p.created_at DESC, p.id DESC`)
-    .all({ uid: 0, owner: ownerId }) as Card[];
+    .all({ uid: 0, owner: ownerId }) as Promise<Card[]>;
 }
 
-export function savedProperties(userId: number) {
-  return getDb()
+export async function savedProperties(userId: number) {
+  const db = await getDb();
+  return db
     .prepare(
       `${CARD_SELECT} JOIN favorites fv ON fv.property_id = p.id AND fv.user_id = @uid
        WHERE p.status='approved' ORDER BY fv.created_at DESC`
     )
-    .all({ uid: userId }) as Card[];
+    .all({ uid: userId }) as Promise<Card[]>;
 }
 
 export type InquiryRow = {
@@ -180,23 +188,28 @@ const INQ_SELECT = `
     u.name AS owner_name, u.agency AS owner_agency
   FROM inquiries q JOIN properties p ON p.id = q.property_id JOIN users u ON u.id = p.owner_id`;
 
-export const inquiriesForOwner = (ownerId: number) =>
-  getDb().prepare(`${INQ_SELECT} WHERE p.owner_id = ? ORDER BY q.created_at DESC, q.id DESC`).all(ownerId) as InquiryRow[];
+export async function inquiriesForOwner(ownerId: number) {
+  const db = await getDb();
+  return db.prepare(`${INQ_SELECT} WHERE p.owner_id = ? ORDER BY q.created_at DESC, q.id DESC`).all(ownerId) as Promise<InquiryRow[]>;
+}
 
-export const inquiriesBySender = (userId: number) =>
-  getDb().prepare(`${INQ_SELECT} WHERE q.sender_id = ? ORDER BY q.created_at DESC, q.id DESC`).all(userId) as InquiryRow[];
+export async function inquiriesBySender(userId: number) {
+  const db = await getDb();
+  return db.prepare(`${INQ_SELECT} WHERE q.sender_id = ? ORDER BY q.created_at DESC, q.id DESC`).all(userId) as Promise<InquiryRow[]>;
+}
 
-export function adminOverview() {
-  const db = getDb();
-  return {
-    pending: db.prepare(`${CARD_SELECT} WHERE p.status='pending' ORDER BY p.created_at ASC`).all({ uid: 0 }) as Card[],
-    all: db.prepare(`${CARD_SELECT} WHERE p.status != 'pending' ORDER BY p.created_at DESC`).all({ uid: 0 }) as Card[],
-    users: db
+export async function adminOverview() {
+  const db = await getDb();
+  const [pending, all, users] = await Promise.all([
+    db.prepare(`${CARD_SELECT} WHERE p.status='pending' ORDER BY p.created_at ASC`).all({ uid: 0 }) as Promise<Card[]>,
+    db.prepare(`${CARD_SELECT} WHERE p.status != 'pending' ORDER BY p.created_at DESC`).all({ uid: 0 }) as Promise<Card[]>,
+    db
       .prepare(
         `SELECT u.id, u.name, u.email, u.role, u.agency, u.verified, u.created_at,
            (SELECT COUNT(*) FROM properties p WHERE p.owner_id = u.id) AS listings
          FROM users u ORDER BY u.created_at DESC, u.id DESC`
       )
-      .all() as { id: number; name: string; email: string; role: string; agency: string | null; verified: number; created_at: string; listings: number }[],
-  };
+      .all() as Promise<{ id: number; name: string; email: string; role: string; agency: string | null; verified: number; created_at: string; listings: number }[]>,
+  ]);
+  return { pending, all, users };
 }

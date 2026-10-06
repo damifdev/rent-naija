@@ -1,56 +1,112 @@
+import "server-only";
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { seedDatabase } from "./seed";
 
-// Node's built-in SQLite (Node 22.13+). Loaded through createRequire so the bundler
-// leaves it alone. There is nothing to compile, so `npm install` works on Windows, macOS and Linux.
-const nodeRequire = createRequire(import.meta.url);
-const { DatabaseSync } = nodeRequire("node:sqlite") as typeof import("node:sqlite");
+const DATA_DIR = path.join(process.cwd(), "data");
+export const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 
-type Param = string | number | null | Record<string, string | number | null>;
+export type Row = Record<string, string | number | null>;
+type Scalar = string | number | null | undefined;
+/** Either `?`-positional args, spread as separate call arguments, or one `@name`/`:name` object. */
+type Args = [] | Scalar[] | [Record<string, Scalar>];
 
-/** Small wrapper so the rest of the app uses a simple prepare/get/all/run API. */
-export class Db {
-  constructor(private raw: import("node:sqlite").DatabaseSync) {}
+/** The async prepare/get/all/run shape the rest of the app codes against,
+ *  whichever engine is actually running underneath. Supports both calling styles
+ *  already used across the app: `stmt.run(a, b, c)` for `?`-positional SQL, and
+ *  `stmt.run({ name: value })` for `@name` SQL. */
+export interface PreparedLike {
+  get(...args: Args): Promise<Row | undefined>;
+  all(...args: Args): Promise<Row[]>;
+  run(...args: Args): Promise<{ changes: number; lastInsertRowid: number }>;
+}
+export interface Db {
+  /** Runs one or more semicolon-separated statements with no parameters (schema setup). */
+  exec(sql: string): Promise<void>;
+  prepare(sql: string): PreparedLike;
+}
 
-  exec(sql: string) {
-    this.raw.exec(sql);
-  }
-
-  prepare(sql: string) {
-    const stmt = this.raw.prepare(sql);
-    // Queries share parameter objects, so extra keys must not throw.
-    stmt.setAllowUnknownNamedParameters(true);
-    const plain = <T,>(row: T): T => (row ? ({ ...row } as T) : row);
+/**
+ * Two engines, same SQL dialect (libSQL is a SQLite superset):
+ *
+ * - Local file, via Node's own built-in `node:sqlite` (Node 22.13+). Nothing to install or
+ *   compile, so `npm install` and `npm run dev` work out of the box on Windows, macOS and Linux.
+ *   This is the default, and what runs on a host with a normal writable disk (e.g. Render).
+ * - Turso (hosted libSQL), via `@libsql/client/web` — a pure-JS/HTTP client with no native
+ *   addon, used only when TURSO_DATABASE_URL is set. This is what makes the app work on Vercel,
+ *   whose serverless functions have no writable, persistent disk for a local SQLite file.
+ *
+ * Switch by setting TURSO_DATABASE_URL (and TURSO_AUTH_TOKEN) in the environment — no code
+ * changes needed either way.
+ */
+async function openDb(): Promise<Db> {
+  const url = process.env.TURSO_DATABASE_URL;
+  if (url) {
+    const { createClient } = await import("@libsql/client/web");
+    const client = createClient({ url, authToken: process.env.TURSO_AUTH_TOKEN });
+    // libsql's `args` accepts a positional array or a named object directly; it just doesn't
+    // allow `undefined` members, so those become `null`.
+    const clean = (v: Scalar) => v ?? null;
+    const toArgs = (args: Args) =>
+      args.length === 1 && typeof args[0] === "object" && args[0] !== null
+        ? Object.fromEntries(Object.entries(args[0]).map(([k, v]) => [k, clean(v)]))
+        : (args as Scalar[]).map(clean);
+    const toRow = (r: Record<string, unknown>): Row => ({ ...r }) as Row;
     return {
-      get: (...args: Param[]): unknown => plain(stmt.get(...(args as never[]))),
-      all: (...args: Param[]): unknown[] => stmt.all(...(args as never[])).map((r) => plain(r)),
-      run: (...args: Param[]) => {
-        const r = stmt.run(...(args as never[]));
-        return { changes: Number(r.changes), lastInsertRowid: Number(r.lastInsertRowid) };
+      async exec(sql) {
+        await client.executeMultiple(sql);
+      },
+      prepare(sql) {
+        return {
+          async get(...args) {
+            const rs = await client.execute({ sql, args: toArgs(args) });
+            return rs.rows[0] ? toRow(rs.rows[0]) : undefined;
+          },
+          async all(...args) {
+            const rs = await client.execute({ sql, args: toArgs(args) });
+            return rs.rows.map(toRow);
+          },
+          async run(...args) {
+            const rs = await client.execute({ sql, args: toArgs(args) });
+            return { changes: Number(rs.rowsAffected), lastInsertRowid: Number(rs.lastInsertRowid ?? 0) };
+          },
+        };
       },
     };
   }
 
-  /** Returns a function that runs `fn` inside a transaction (commit on success, rollback on error). */
-  transaction<T>(fn: () => T): () => T {
-    return () => {
-      this.raw.exec("BEGIN");
-      try {
-        const result = fn();
-        this.raw.exec("COMMIT");
-        return result;
-      } catch (err) {
-        this.raw.exec("ROLLBACK");
-        throw err;
-      }
-    };
-  }
+  // Loaded via createRequire so the bundler leaves it alone, and only reached when
+  // TURSO_DATABASE_URL is unset — so this path, and its platform binary, are never touched
+  // in a Turso/Vercel deployment.
+  const nodeRequire = createRequire(import.meta.url);
+  const { DatabaseSync } = nodeRequire("node:sqlite") as typeof import("node:sqlite");
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  const raw = new DatabaseSync(path.join(DATA_DIR, "rentnaija.db"));
+  raw.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+  const plain = <T,>(row: T): T => (row ? ({ ...row } as T) : row);
+  return {
+    async exec(sql) {
+      raw.exec(sql);
+    },
+    prepare(sql) {
+      const stmt = raw.prepare(sql);
+      stmt.setAllowUnknownNamedParameters(true); // named-params objects are shared across queries
+      return {
+        async get(...args) {
+          return plain(stmt.get(...(args as never[]))) as Row | undefined;
+        },
+        async all(...args) {
+          return (stmt.all(...(args as never[])) as Row[]).map(plain);
+        },
+        async run(...args) {
+          const r = stmt.run(...(args as never[]));
+          return { changes: Number(r.changes), lastInsertRowid: Number(r.lastInsertRowid) };
+        },
+      };
+    },
+  };
 }
-
-const DATA_DIR = path.join(process.cwd(), "data");
-export const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -120,19 +176,19 @@ CREATE TABLE IF NOT EXISTS favorites (
 );
 `;
 
-const g = globalThis as unknown as { __rentnaijaDb?: Db };
+const g = globalThis as unknown as { __rentnaijaDb?: Promise<Db> };
 
-function open() {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-  const db = new Db(new DatabaseSync(path.join(DATA_DIR, "rentnaija.db")));
-  db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
-  db.exec(SCHEMA);
-  const { n } = db.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number };
-  if (n === 0) seedDatabase(db);
-  return db;
+function init(): Promise<Db> {
+  return (async () => {
+    const db = await openDb();
+    await db.exec(SCHEMA);
+    const { n } = (await db.prepare("SELECT COUNT(*) AS n FROM users").get()) as { n: number };
+    if (n === 0) await seedDatabase(db);
+    return db;
+  })();
 }
 
-export function getDb() {
-  if (!g.__rentnaijaDb) g.__rentnaijaDb = open();
+export function getDb(): Promise<Db> {
+  if (!g.__rentnaijaDb) g.__rentnaijaDb = init();
   return g.__rentnaijaDb;
 }

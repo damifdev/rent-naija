@@ -121,7 +121,7 @@ const LISTINGS: Seed[] = [
     blurb: "Family duplex in Enugu GRA with a boys' quarters, a big compound and a quiet, shaded street." },
 ];
 
-export function seedDatabase(db: Db) {
+export async function seedDatabase(db: Db) {
   const hash = bcrypt.hashSync(DEMO_PASSWORD, 10);
   const adminEmail = (process.env.ADMIN_EMAIL || "admin@rentnaija.test").toLowerCase();
   const adminHash = bcrypt.hashSync(process.env.ADMIN_PASSWORD || "Admin123!", 10);
@@ -130,94 +130,92 @@ export function seedDatabase(db: Db) {
     `INSERT INTO users (name, email, phone, password_hash, role, agency, avatar_url, verified)
      VALUES (@name, @email, @phone, @hash, @role, @agency, @avatar, @verified)`
   );
-  const user = (u: {
+  const user = async (u: {
     name: string; email: string; phone: string; role: string;
     agency?: string; avatar?: string; verified?: number; hash?: string;
   }) =>
     Number(
-      insertUser.run({
+      (await insertUser.run({
         agency: null, avatar: null, verified: 0, hash, ...u,
-      }).lastInsertRowid
+      })).lastInsertRowid
     );
 
-  const tx = db.transaction(() => {
-    user({ name: "RentNaija Admin", email: adminEmail, phone: "", role: "admin", hash: adminHash, verified: 1 });
+  // One-time setup script; a failure partway through just means re-running `npm run db:reset`,
+  // so this runs as plain sequential awaits rather than a single all-or-nothing transaction.
+  await user({ name: "RentNaija Admin", email: adminEmail, phone: "", role: "admin", hash: adminHash, verified: 1 });
 
-    const owners = {
-      chioma: user({ name: "Chioma Okeke", email: "chioma@rentnaija.test", phone: "0803 555 0142", role: "landlord", agency: "Lekki Hub", avatar: "/images/agent-chioma.jpg", verified: 1 }),
-      ibrahim: user({ name: "Ibrahim Danladi", email: "ibrahim@rentnaija.test", phone: "0812 555 0188", role: "landlord", agency: "Capital Homes Abuja", verified: 1 }),
-      babajide: user({ name: "Babajide Shittu", email: "babajide@rentnaija.test", phone: "0806 555 0119", role: "landlord", agency: "Premier Properties", verified: 1 }),
-      emeka: user({ name: "Emeka Nwosu", email: "emeka@rentnaija.test", phone: "0809 555 0163", role: "landlord", agency: "Garden City Realty" }),
-      ngozi: user({ name: "Ngozi Eze", email: "ngozi@rentnaija.test", phone: "0805 555 0127", role: "landlord", agency: "Coal City Lettings", verified: 1 }),
-    };
-    const tunde = user({ name: "Tunde Adeyemi", email: "tunde@rentnaija.test", phone: "0803 555 0294", role: "tenant" });
-    const amina = user({ name: "Amina Bello", email: "amina@rentnaija.test", phone: "0812 555 0942", role: "tenant" });
+  const owners = {
+    chioma: await user({ name: "Chioma Okeke", email: "chioma@rentnaija.test", phone: "0803 555 0142", role: "landlord", agency: "Lekki Hub", avatar: "/images/agent-chioma.jpg", verified: 1 }),
+    ibrahim: await user({ name: "Ibrahim Danladi", email: "ibrahim@rentnaija.test", phone: "0812 555 0188", role: "landlord", agency: "Capital Homes Abuja", verified: 1 }),
+    babajide: await user({ name: "Babajide Shittu", email: "babajide@rentnaija.test", phone: "0806 555 0119", role: "landlord", agency: "Premier Properties", verified: 1 }),
+    emeka: await user({ name: "Emeka Nwosu", email: "emeka@rentnaija.test", phone: "0809 555 0163", role: "landlord", agency: "Garden City Realty" }),
+    ngozi: await user({ name: "Ngozi Eze", email: "ngozi@rentnaija.test", phone: "0805 555 0127", role: "landlord", agency: "Coal City Lettings", verified: 1 }),
+  };
+  const tunde = await user({ name: "Tunde Adeyemi", email: "tunde@rentnaija.test", phone: "0803 555 0294", role: "tenant" });
+  const amina = await user({ name: "Amina Bello", email: "amina@rentnaija.test", phone: "0812 555 0942", role: "tenant" });
 
-    const insertProp = db.prepare(
-      `INSERT INTO properties (owner_id, title, description, type, state, area, price_yearly, bedrooms, bathrooms,
-         area_sqm, tag, amenities, status, rented, featured, created_at)
-       VALUES (@owner, @title, @desc, @type, @state, @area, @price, @beds, @baths, @sqm, @tag, @amenities,
-         @status, @rented, @featured, datetime('now', @ago))`
-    );
-    const insertImg = db.prepare(
-      "INSERT INTO property_images (property_id, url, position) VALUES (?, ?, ?)"
-    );
+  const insertProp = db.prepare(
+    `INSERT INTO properties (owner_id, title, description, type, state, area, price_yearly, bedrooms, bathrooms,
+       area_sqm, tag, amenities, status, rented, featured, created_at)
+     VALUES (@owner, @title, @desc, @type, @state, @area, @price, @beds, @baths, @sqm, @tag, @amenities,
+       @status, @rented, @featured, datetime('now', @ago))`
+  );
+  const insertImg = db.prepare(
+    "INSERT INTO property_images (property_id, url, position) VALUES (?, ?, ?)"
+  );
 
-    const ids: number[] = [];
-    LISTINGS.forEach((l, i) => {
-      const id = Number(
-        insertProp.run({
-          owner: owners[l.owner],
-          title: l.title,
-          desc: l.blurb,
-          type: l.type,
-          state: l.state,
-          area: l.area,
-          price: l.price,
-          beds: l.beds,
-          baths: l.baths,
-          sqm: l.sqm ?? null,
-          tag: l.tag ?? null,
-          amenities: JSON.stringify(l.amenities),
-          status: l.status ?? "approved",
-          rented: l.rented ? 1 : 0,
-          featured: l.featured ? 1 : 0,
-          ago: `-${l.daysAgo} days`,
-        }).lastInsertRowid
-      );
-      ids.push(id);
-      const base = ["living", "bedroom", "exterior"] as const;
-      const order =
-        l.type === "flat"
-          ? [...base]
-          : l.type === "room" || l.type === "self_contain"
-          ? ["bedroom", "living", "exterior"]
-          : ["exterior", "living", "bedroom"];
-      const rot = i % 3;
-      const rotated = [...order.slice(rot), ...order.slice(0, rot)] as (keyof typeof PHOTOS)[];
-      // Duplexes/bungalows lead with the building; keep that regardless of rotation.
-      const final = ["duplex", "bungalow", "terrace"].includes(l.type) ? (order as (keyof typeof PHOTOS)[]) : rotated;
-      final.forEach((k, pos) => insertImg.run(id, PHOTOS[k], pos));
+  const ids: number[] = [];
+  for (const [i, l] of LISTINGS.entries()) {
+    const { lastInsertRowid } = await insertProp.run({
+      owner: owners[l.owner],
+      title: l.title,
+      desc: l.blurb,
+      type: l.type,
+      state: l.state,
+      area: l.area,
+      price: l.price,
+      beds: l.beds,
+      baths: l.baths,
+      sqm: l.sqm ?? null,
+      tag: l.tag ?? null,
+      amenities: JSON.stringify(l.amenities),
+      status: l.status ?? "approved",
+      rented: l.rented ? 1 : 0,
+      featured: l.featured ? 1 : 0,
+      ago: `-${l.daysAgo} days`,
     });
+    const id = Number(lastInsertRowid);
+    ids.push(id);
+    const base = ["living", "bedroom", "exterior"] as const;
+    const order =
+      l.type === "flat"
+        ? [...base]
+        : l.type === "room" || l.type === "self_contain"
+        ? ["bedroom", "living", "exterior"]
+        : ["exterior", "living", "bedroom"];
+    const rot = i % 3;
+    const rotated = [...order.slice(rot), ...order.slice(0, rot)] as (keyof typeof PHOTOS)[];
+    // Duplexes/bungalows lead with the building; keep that regardless of rotation.
+    const final = ["duplex", "bungalow", "terrace"].includes(l.type) ? (order as (keyof typeof PHOTOS)[]) : rotated;
+    for (const [pos, k] of final.entries()) await insertImg.run(id, PHOTOS[k], pos);
+  }
 
-    const inquiry = db.prepare(
-      `INSERT INTO inquiries (property_id, sender_id, name, phone, message, read_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, datetime('now', ?))`
-    );
-    inquiry.run(ids[0], tunde, "Tunde Adeyemi", "0803 555 0294",
-      "Good afternoon Chioma. Is this Lekki flat still available for inspection this Saturday around 11:00 AM? I am pre-approved for immediate move-in.",
-      null, "-2 hours");
-    inquiry.run(ids[10], amina, "Amina Bello", "0812 555 0942",
-      "Hello, does the service charge cover 24-hour generator power and security in the estate? Kindly confirm before I proceed with agency fee.",
-      null, "-1 days");
-    inquiry.run(ids[19], tunde, "Tunde Adeyemi", "0803 555 0294",
-      "I would like to inspect this weekend. Can you share the service charge breakdown?",
-      "2026-09-18 10:00:00", "-1 days");
+  const inquiry = db.prepare(
+    `INSERT INTO inquiries (property_id, sender_id, name, phone, message, read_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, datetime('now', ?))`
+  );
+  await inquiry.run(ids[0], tunde, "Tunde Adeyemi", "0803 555 0294",
+    "Good afternoon Chioma. Is this Lekki flat still available for inspection this Saturday around 11:00 AM? I am pre-approved for immediate move-in.",
+    null, "-2 hours");
+  await inquiry.run(ids[10], amina, "Amina Bello", "0812 555 0942",
+    "Hello, does the service charge cover 24-hour generator power and security in the estate? Kindly confirm before I proceed with agency fee.",
+    null, "-1 days");
+  await inquiry.run(ids[19], tunde, "Tunde Adeyemi", "0803 555 0294",
+    "I would like to inspect this weekend. Can you share the service charge breakdown?",
+    "2026-09-18 10:00:00", "-1 days");
 
-    const fav = db.prepare("INSERT INTO favorites (user_id, property_id) VALUES (?, ?)");
-    fav.run(tunde, ids[1]);
-    fav.run(tunde, ids[19]);
-    fav.run(amina, ids[12]);
-  });
-  tx();
+  const fav = db.prepare("INSERT INTO favorites (user_id, property_id) VALUES (?, ?)");
+  await fav.run(tunde, ids[1]);
+  await fav.run(tunde, ids[19]);
+  await fav.run(amina, ids[12]);
 }

@@ -21,11 +21,11 @@ export async function signup(_: FormState, fd: FormData): Promise<FormState> {
     return { error: "Too many sign-up attempts. Try again in an hour." };
   }
 
-  const db = getDb();
-  if (db.prepare("SELECT 1 FROM users WHERE email = ?").get(d.email)) {
+  const db = await getDb();
+  if (await db.prepare("SELECT 1 FROM users WHERE email = ?").get(d.email)) {
     return { fieldErrors: { email: "An account with this email already exists. Log in instead." } };
   }
-  const info = db
+  const info = await db
     .prepare("INSERT INTO users (name, email, phone, password_hash, role) VALUES (?,?,?,?,?)")
     .run(d.name, d.email, d.phone, bcrypt.hashSync(d.password, 10), d.role);
   await createSession(Number(info.lastInsertRowid));
@@ -41,9 +41,10 @@ export async function login(_: FormState, fd: FormData): Promise<FormState> {
     return { error: "Too many attempts. Wait a few minutes and try again." };
   }
 
-  const row = getDb()
+  const db = await getDb();
+  const row = (await db
     .prepare("SELECT id, password_hash FROM users WHERE email = ?")
-    .get(email) as { id: number; password_hash: string } | undefined;
+    .get(email)) as { id: number; password_hash: string } | undefined;
   if (!row || !bcrypt.compareSync(password, row.password_hash)) {
     return { error: "Email or password is incorrect." };
   }

@@ -10,7 +10,7 @@ export const metadata: Metadata = { title: "Edit listing" };
 export default async function EditListingPage({ params }: { params: Promise<{ id: string }> }) {
   const user = await requireUser(["landlord", "admin"]);
   const id = Number((await params).id);
-  const p = Number.isInteger(id) ? getProperty(id, null) : null;
+  const p = Number.isInteger(id) ? await getProperty(id, null) : null;
   if (!p || (p.owner_id !== user.id && user.role !== "admin")) notFound();
   return (
     <div className="mx-auto max-w-2xl px-4 py-8 md:py-10">
